@@ -1,6 +1,12 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Dynamic;
+using System.Globalization;
 using System.IO;
+using System.Net.Http.Headers;
+using System.Reflection.Metadata.Ecma335;
 using System.Text.RegularExpressions;
 using System.Xml;
 
@@ -35,6 +41,15 @@ namespace JackCompiler
         };
 
         static int tokenIndex = 0;
+        static int labelIndex = 0;
+
+        static SymbolTable classTable = new SymbolTable();
+        static SymbolTable subroutineTable = new SymbolTable();
+
+        static string className = "";
+
+        static StreamWriter fileWriter;
+        static VMWriter vmWriter;
 
         static int Main(string[] args)
         {
@@ -85,7 +100,8 @@ namespace JackCompiler
                 string line = "";
                 while ((line = reader.ReadLine()) != null)
                 {
-
+                    // Comment removal
+                    
                     if(line.Contains("/*") && line.Contains("*/"))
                     {
                         var startIndex = line.IndexOf("/*");
@@ -93,9 +109,11 @@ namespace JackCompiler
 
                         line = line.Remove(startIndex, endIndex - startIndex);
                     }
-                    else if(line.StartsWith("/*"))
+                    else if(line.Contains("/*"))
                     {
                         isComment = true;
+
+                        line = line.Split("/*")[0];
                     }
 
                     if (isComment && line.Contains("*/"))
@@ -114,7 +132,7 @@ namespace JackCompiler
 
                     line = line.Split("//")[0];
 
-                    line = line.Replace("  ", " ");
+                    // Parsing
 
                     string token = "";
 
@@ -122,9 +140,9 @@ namespace JackCompiler
 
                     for (int i = 0; i < line.Length; i++)
                     {
-                        token = token.Trim();
                         string curr = line[i].ToString();
 
+                        // String
                         if (token.StartsWith('"'))
                         {
                             if (curr != "\"")
@@ -143,6 +161,9 @@ namespace JackCompiler
                             continue;
                         }
 
+                        token = token.Trim();
+
+                        // String
                         if (curr == " " && (token == "" || token == " "))
                         {
                             continue;
@@ -156,8 +177,6 @@ namespace JackCompiler
                             else if (keywords.Contains(token))// exists in keywords so its a keyword
                             {
                                 tokens.Add(new Token(token, "keyword"));
-
-                                token = "";
                             }
                             else
                             {
@@ -172,6 +191,10 @@ namespace JackCompiler
                             {
                                 tokens.Add(new Token(token, "integerConstant"));
                             }
+                            else if(keywords.Contains(token)) //
+                            {
+                                tokens.Add(new Token(token, "keyword"));
+                            }
                             else if (token != "")
                             {
                                 tokens.Add(new Token(token, "identifier"));
@@ -185,21 +208,23 @@ namespace JackCompiler
                         {
                             token += curr;
 
-                            if (keywords.Contains(token))// exists in keywords so its a keyword
-                            {
-                                tokens.Add(new Token(token, "keyword"));
+                            //if (keywords.Contains(token))// exists in keywords so its a keyword
+                            //{
+                            //    tokens.Add(new Token(token, "keyword"));
 
-                                token = "";
-                            }
+                            //    token = "";
+                            //}
                         }
                     }
                 }
             }
 
-            foreach (var token in tokens)
-            {
-                Console.WriteLine(token.text + ", " + token.type);
-            }
+            Console.WriteLine("----------------------------------------------------------------------");
+
+            //foreach (var token in tokens)
+            //{
+            //    Console.WriteLine(token.text + ", " + token.type);
+            //}
 
             return tokens;
         }
@@ -216,6 +241,9 @@ namespace JackCompiler
                 OmitXmlDeclaration = true
             };
 
+            fileWriter = new StreamWriter(filepath.Replace("T.xml", ".vm"));
+            vmWriter = new VMWriter(fileWriter);
+
             using (XmlWriter writer = XmlWriter.Create(filepath, xmlWriterSettings))
             {
                 writer.WriteStartDocument();
@@ -231,11 +259,21 @@ namespace JackCompiler
 
                 writer.WriteEndDocument();
             }
+
+            fileWriter.Close();
         }
 
-        private static void WriteElement(XmlWriter writer, List<Token> tokens)
+        private static void WriteElement(XmlWriter writer, List<Token> tokens, string elementName = "")
         {
-            writer.WriteStartElement(tokens[tokenIndex].type);
+            if(elementName != "")
+            {
+                writer.WriteStartElement(elementName);
+            }
+            else
+            {
+                writer.WriteStartElement(tokens[tokenIndex].type);
+            }
+
             writer.WriteString(" " + tokens[tokenIndex].text + " ");
             writer.WriteEndElement();
 
@@ -244,6 +282,9 @@ namespace JackCompiler
 
         private static void CompileClass(XmlWriter writer, List<Token> tokens)
         {
+            // Reset symbol table for every class
+            classTable.StartSubroutine();
+
             // Root
             writer.WriteStartElement("class");
 
@@ -251,7 +292,10 @@ namespace JackCompiler
             WriteElement(writer, tokens);
 
             // className
-            WriteElement(writer, tokens);
+            className = tokens[tokenIndex].text;
+            WriteElement(writer, tokens, "class");
+
+            fileWriter.WriteLine("// Class "  + className);
 
             // {
             WriteElement(writer, tokens);
@@ -270,6 +314,8 @@ namespace JackCompiler
             WriteElement(writer, tokens);
 
             writer.WriteEndElement();
+
+            vmWriter.Close();
         }
 
         private static void CompileClassVarDec(XmlWriter writer, List<Token> tokens)
@@ -278,13 +324,19 @@ namespace JackCompiler
             writer.WriteStartElement("classVarDec");
 
             //Static or field
+            string kind = tokens[tokenIndex].text;
             WriteElement(writer, tokens);
 
             //Type
+            string type = tokens[tokenIndex].text;
             WriteElement(writer, tokens);
 
             //identifier / name
-            WriteElement(writer, tokens);
+            string name = tokens[tokenIndex].text;
+            WriteElement(writer, tokens, kind + "_" + classTable.VarCount(kind));
+
+            //Add new symbol to class table
+            classTable.Define(name, type, kind);
 
             while (tokens[tokenIndex].text == ",")
             {
@@ -292,7 +344,11 @@ namespace JackCompiler
                 WriteElement(writer, tokens);
 
                 // varName
-                WriteElement(writer, tokens);
+                name = tokens[tokenIndex].text;
+                WriteElement(writer, tokens, kind + "_" + classTable.VarCount(kind));
+
+                //Add new symbol to class table
+                classTable.Define(name, type, kind);
             }
 
             // ;
@@ -304,17 +360,36 @@ namespace JackCompiler
 
         private static void CompileSubroutine(XmlWriter writer, List<Token> tokens)
         {
+            subroutineTable.StartSubroutine();
+
             //Start Root
             writer.WriteStartElement("subroutineDec");
 
             // func, method, or ctor
+            string routineType = tokens[tokenIndex].text;
             WriteElement(writer, tokens);
 
-            //void or type
-            WriteElement(writer, tokens);
+            // void or type
+            string type = tokens[tokenIndex].text;
+            if(type != "void")
+            {
+                WriteElement(writer, tokens,"class_used");
+            }
+            else
+            {
+                WriteElement(writer, tokens);
+            }
 
             // identifier / name
-            WriteElement(writer, tokens);
+            string name = tokens[tokenIndex].text;
+            WriteElement(writer, tokens, "subroutine_defined");
+
+            fileWriter.WriteLine("// " + routineType + " " + type + " " + name);
+
+            if(routineType == "method")
+            {
+                subroutineTable.Define("this", className, "arg");
+            }
 
             // parameterList
             ComposeParameterList(writer, tokens);
@@ -324,9 +399,24 @@ namespace JackCompiler
             // {
             WriteElement(writer, tokens);
 
+            int numLocalVar = 0;
             while (tokens[tokenIndex].text == "var")
             {
-                CompileVarDec(writer, tokens);
+                numLocalVar += CompileVarDec(writer, tokens);
+            }
+
+            vmWriter.WriteFunction(className + "." + name, numLocalVar);
+
+            if (routineType == "constructor")
+            {
+                vmWriter.WritePush("constant", classTable.VarCount("field")); // push num of class vars to stack
+                vmWriter.WriteCall("Memory.alloc", 1); // creates memory for the variables
+                vmWriter.WritePop("pointer", 0); // pushes the base address to the this segment making it the current object
+            }
+            else if(routineType == "method")
+            {
+                vmWriter.WritePush("argument", 0);
+                vmWriter.WritePop("pointer", 0);
             }
 
             CompileStatements(writer, tokens);
@@ -401,10 +491,18 @@ namespace JackCompiler
             // return
             WriteElement(writer, tokens);
 
+            fileWriter.WriteLine("// return"); 
+
             if (tokens[tokenIndex].text != ";")
             {
                 CompileExpression(writer, tokens);
             }
+            else
+            {
+                vmWriter.WritePush("constant", 0);
+            }
+
+            vmWriter.WriteReturn();
 
             // ;
             WriteElement(writer, tokens);
@@ -419,34 +517,87 @@ namespace JackCompiler
             // do
             WriteElement(writer, tokens);
 
-            if (tokens[tokenIndex + 1].text == "(")
+            if (tokens[tokenIndex + 1].text == "(") // do method(expression)
             {
                 // subroutineName
+                string subroutineName = tokens[tokenIndex].text;
+                WriteElement(writer, tokens, "subroutine_used");
+
+                // (  
                 WriteElement(writer, tokens);
 
-                // (
-                WriteElement(writer, tokens);
+                vmWriter.WritePush("pointer", 0);
 
-                CompileExpressionList(writer, tokens);
+                int numArgs = CompileExpressionList(writer, tokens);
+
+                fileWriter.WriteLine("// do " + subroutineName);
+
+                vmWriter.WriteCall(className + "." + subroutineName, numArgs + 1);
+
+                vmWriter.WritePop("temp", 1);
 
                 // )
                 WriteElement(writer, tokens);
             }
-            else
+            else // do var.method() or do class.method()
             {
                 // varName or className
-                WriteElement(writer, tokens);
+                //Check if in class or subtable  else its a class name
+                string name = tokens[tokenIndex].text;
+                bool isClass = false;
+                string kind = "";
+                string type = "";
+                int index = -1;
+
+                if (subroutineTable.IndexOf(name) != -1)
+                {
+                    kind = subroutineTable.KindOf(name);
+                    type = subroutineTable.TypeOf(name);
+                    index = subroutineTable.IndexOf(name);
+                    WriteElement(writer, tokens, kind + "_" + index + "_used");
+                }
+                else if (classTable.IndexOf(name) != -1)
+                {
+                    kind = classTable.KindOf(name);
+                    type = classTable.TypeOf(name);
+                    index = classTable.IndexOf(name);
+                    WriteElement(writer, tokens, classTable.KindOf(name) + "_" + classTable.IndexOf(name) + "_used");
+                }
+                else
+                {
+                    isClass = true;
+                    WriteElement(writer, tokens, "class_used");
+                }
 
                 // .
                 WriteElement(writer, tokens);
 
                 // subroutineName
-                WriteElement(writer, tokens);
+                string subroutineName = tokens[tokenIndex].text;
+                WriteElement(writer, tokens, "subroutine_used");
+
+                fileWriter.WriteLine("// do " + name + "." + subroutineName);
 
                 // (
                 WriteElement(writer, tokens);
 
-                CompileExpressionList(writer, tokens);
+                if (!isClass)
+                {
+                    vmWriter.WritePush(kind, index);
+                }
+
+                int numArgs = CompileExpressionList(writer, tokens);
+
+                if (!isClass)
+                {
+                    vmWriter.WriteCall(type + "." + subroutineName, numArgs + 1);
+                }
+                else
+                {
+                    vmWriter.WriteCall(name + "." + subroutineName, numArgs);
+                }
+
+                vmWriter.WritePop("temp", 1);
 
                 // )
                 WriteElement(writer, tokens);
@@ -455,12 +606,19 @@ namespace JackCompiler
             // ;
             WriteElement(writer, tokens);
 
+            //fileWriter.Write(Environment.NewLine);
+
             writer.WriteEndElement();
         }
 
         private static void CompileWhile(XmlWriter writer, List<Token> tokens)
         {
             writer.WriteStartElement("whileStatement");
+
+            string whileLabel = "label_" + labelIndex++;
+            string endWhileLabel = "label_" + labelIndex++;
+
+            vmWriter.WriteLabel(whileLabel);
 
             // while
             WriteElement(writer, tokens);
@@ -470,6 +628,10 @@ namespace JackCompiler
 
             CompileExpression(writer, tokens);
 
+            // Inverts condition and if true goto exit
+            vmWriter.WriteArithmetic("not");
+            vmWriter.WriteIf(endWhileLabel);
+
             // )
             WriteElement(writer, tokens);
 
@@ -481,12 +643,21 @@ namespace JackCompiler
             // }
             WriteElement(writer, tokens);
 
+            vmWriter.WriteGoto(whileLabel);
+
+            vmWriter.WriteLabel(endWhileLabel);
+
             writer.WriteEndElement();
         }
 
         private static void CompileIf(XmlWriter writer, List<Token> tokens)
         {
             writer.WriteStartElement("ifStatement");
+
+            string elseLabel = "label_" + labelIndex++;
+            string endIfLabel = "label_" + labelIndex++;
+
+            fileWriter.WriteLine("// if statement");
 
             // if
             WriteElement(writer, tokens);
@@ -496,19 +667,30 @@ namespace JackCompiler
 
             CompileExpression(writer, tokens);
 
+            // inverts consition and skips if block when inverse condition is true
+            vmWriter.WriteArithmetic("not");
+            vmWriter.WriteIf(elseLabel);
+
             // )
             WriteElement(writer, tokens);
 
             // {
             WriteElement(writer, tokens);
 
+            //Console.WriteLine(tokens[tokenIndex].text);
             CompileStatements(writer, tokens);
 
             // }
             WriteElement(writer, tokens);
 
+            // finished if skip to after else
+            vmWriter.WriteGoto(endIfLabel);
+            // else to skip to if condition is false
+            vmWriter.WriteLabel(elseLabel);
+
             if (tokens[tokenIndex].text == "else")
             {
+
                 // else
                 WriteElement(writer, tokens);
 
@@ -521,26 +703,56 @@ namespace JackCompiler
                 WriteElement(writer, tokens);
             }
 
+            // after if completes it skips to here
+            vmWriter.WriteLabel(endIfLabel);
+
             writer.WriteEndElement();
         }
 
         private static void CompileLet(XmlWriter writer, List<Token> tokens)
         {
+            bool isArray = false;
+
             writer.WriteStartElement("letStatement");
 
             // let
             WriteElement(writer, tokens);
 
             // varName
-            WriteElement(writer, tokens);
+            string name = tokens[tokenIndex].text;
+            string kind = "";
+            int index = -1;
+
+            if (subroutineTable.IndexOf(name) != -1)
+            {
+                kind = subroutineTable.KindOf(name);
+                index = subroutineTable.IndexOf(name);
+                WriteElement(writer, tokens, subroutineTable.KindOf(name) + "_" + subroutineTable.IndexOf(name) + "_used");
+            }
+            else if (classTable.IndexOf(name) != -1)
+            {
+                kind = subroutineTable.KindOf(name);
+                index = subroutineTable.IndexOf(name);
+                WriteElement(writer, tokens, classTable.KindOf(name) + "_" + classTable.IndexOf(name) + "_used");
+            }
+            else
+            {
+                WriteElement(writer, tokens, "var_MissingNo_used");
+            }
 
             // [ + Expression +  ] 
             if (tokens[tokenIndex].text == "[")
             {
+                isArray = true;
+
                 // [
                 WriteElement(writer, tokens);
 
+                vmWriter.WritePush(kind, index);
+
                 CompileExpression(writer, tokens);
+
+                vmWriter.WriteArithmetic("+");
 
                 // ]
                 WriteElement(writer, tokens);
@@ -551,6 +763,22 @@ namespace JackCompiler
 
             // expression
             CompileExpression(writer, tokens);
+
+            if(isArray) //var[i]
+            {
+                vmWriter.WritePop("temp", 1); // stores temp val
+                vmWriter.WritePop("pointer", 1); // sets var[i] to the current array int in that
+                vmWriter.WritePush("temp", 1); // gets the value to push to the array
+                vmWriter.WritePop("that", 0); // puts the value into the array at the that segment which is var[i]
+            }
+            else if(subroutineTable.IndexOf(name) != -1) // local var
+            {
+                vmWriter.WritePop(subroutineTable.KindOf(name), subroutineTable.IndexOf(name));
+            }
+            else if(classTable.IndexOf(name) != -1) // class var
+            {
+                vmWriter.WritePop(classTable.KindOf(name), classTable.IndexOf(name));
+            }
 
             // ;
             WriteElement(writer, tokens);
@@ -569,34 +797,47 @@ namespace JackCompiler
             while (ops.Contains(tokens[tokenIndex].text))
             {
                 // op
+                string op = tokens[tokenIndex].text;
                 WriteElement(writer, tokens);
 
                 CompileTerm(writer, tokens);
+
+                vmWriter.WriteArithmetic(op);
             }
 
             writer.WriteEndElement();
         }
 
-        private static void CompileExpressionList(XmlWriter writer, List<Token> tokens)
+        private static int CompileExpressionList(XmlWriter writer, List<Token> tokens)
         {
             writer.WriteStartElement("expressionList");
 
             writer.WriteString("");
 
+            int numExpressions = 0;
+
             if(tokens[tokenIndex].text != ")")
             {
                 CompileExpression(writer, tokens);
-                
+
+                numExpressions = 1;
+
                 while(tokens[tokenIndex].text == ",")
                 {
                     // ,
                     WriteElement(writer, tokens);
 
                     CompileExpression(writer, tokens);
+
+                    numExpressions++;
                 }
+
+
             }
 
             writer.WriteEndElement();
+
+            return numExpressions;
         }
 
         private static void CompileTerm(XmlWriter writer, List<Token> tokens)
@@ -605,10 +846,16 @@ namespace JackCompiler
 
             if (tokens[tokenIndex].text == "-" || tokens[tokenIndex].text == "~")
             {
-                // unary op
+                // unary op - -x or ~(x == y) or etc..
+                string op = tokens[tokenIndex].text;
                 WriteElement(writer, tokens);
 
                 CompileTerm(writer, tokens);
+
+                if (op == "-")
+                    vmWriter.WriteArithmetic("neg");
+                else if (op == "~")
+                    vmWriter.WriteArithmetic("not");
             }
             else if (tokens[tokenIndex].text == "(") // ( expression )
             {
@@ -623,18 +870,62 @@ namespace JackCompiler
             else if (tokens[tokenIndex + 1].text == ".") // foo.Method()
             {
                 // varName or className
-                WriteElement(writer, tokens);
+                //Check if in classtable or subtable else its a class name
+                string name = tokens[tokenIndex].text;
+                bool isClass = false;
+                string kind = "";
+                string type = "";
+                int index = -1;
+
+                if (subroutineTable.IndexOf(name) != -1)
+                {
+                    kind = subroutineTable.KindOf(name);
+                    type = subroutineTable.TypeOf(name);
+                    index = subroutineTable.IndexOf(name);
+                    WriteElement(writer, tokens, kind + "_" + index + "_used");
+                }
+                else if (classTable.IndexOf(name) != -1)
+                {
+                    kind = classTable.KindOf(name);
+                    type = classTable.TypeOf(name);
+                    index = classTable.IndexOf(name);
+                    WriteElement(writer, tokens, classTable.KindOf(name) + "_" + classTable.IndexOf(name) + "_used");
+                }
+                else
+                {
+                    isClass = true;
+                    WriteElement(writer, tokens, "class_used");
+                }
 
                 // .
                 WriteElement(writer, tokens);
 
                 // subroutineName
-                WriteElement(writer, tokens);
-
+                string subroutineName = tokens[tokenIndex].text;
+                WriteElement(writer, tokens, "subroutine_used");
+                
                 // (
                 WriteElement(writer, tokens);
 
-                CompileExpressionList(writer, tokens);
+                if (!isClass)
+                {
+                    vmWriter.WritePush(kind, index);
+                }
+
+                //push pointer if !isClass ?
+
+                int numArgs = CompileExpressionList(writer, tokens);
+
+                if (!isClass)
+                {
+                    vmWriter.WriteCall(type + "." + subroutineName, numArgs + 1);
+                }
+                else
+                {
+                    vmWriter.WriteCall(name + "." + subroutineName, numArgs);
+                }
+
+                //vmWriter.WritePop("temp", 1);
 
                 // )
                 WriteElement(writer, tokens);
@@ -642,12 +933,17 @@ namespace JackCompiler
             else if (tokens[tokenIndex + 1].text == "(") // Method()
             {
                 // subroutineName
-                WriteElement(writer, tokens);
+                string name = tokens[tokenIndex].text;
+                WriteElement(writer, tokens, "subroutine_used");
 
                 // (
                 WriteElement(writer, tokens);
 
-                CompileExpressionList(writer, tokens);
+                int numArgs = CompileExpressionList(writer, tokens);
+
+                vmWriter.WriteCall(name, numArgs + 1);
+
+                //vmWriter.WritePop("temp", 1);
 
                 // )
                 WriteElement(writer, tokens);
@@ -655,37 +951,129 @@ namespace JackCompiler
             else if (tokens[tokenIndex + 1].text == "[") // foo[val]
             {
                 // varName
-                WriteElement(writer, tokens);
+                string name = tokens[tokenIndex].text;
+                string kind = "";
+                int index = -1;
+
+                if (subroutineTable.IndexOf(name) != -1)
+                {
+                    kind = subroutineTable.KindOf(name);
+                    index = subroutineTable.IndexOf(name);
+                    WriteElement(writer, tokens, subroutineTable.KindOf(name) + "_" + subroutineTable.IndexOf(name) + "_used");
+                }
+                else if (classTable.IndexOf(name) != -1)
+                {
+                    kind = classTable.KindOf(name);
+                    index = classTable.IndexOf(name);
+                    WriteElement(writer, tokens, classTable.KindOf(name) + "_" + classTable.IndexOf(name) + "_used");
+                }
+                else
+                {
+                    WriteElement(writer, tokens, "var_MissingNo_used");
+                }
 
                 // [
                 WriteElement(writer, tokens);
 
+                vmWriter.WritePush(kind, index);
+
                 CompileExpression(writer, tokens);
+
+                vmWriter.WriteArithmetic("+"); // adds var + [i]
+
+                vmWriter.WritePop("pointer", 1); // sets as current array
+                vmWriter.WritePush("that", 0); // gets value stored in array index
 
                 // ]
                 WriteElement(writer, tokens);
             }
-
             else // constants, varName, etc
             {
-                WriteElement(writer, tokens);
+                string name = tokens[tokenIndex].text;
+                int constVal = -1;
+
+                if (name == "true")
+                {
+                    vmWriter.WritePush("constant", 1);
+                    vmWriter.WriteArithmetic("neg");
+
+                    WriteElement(writer, tokens);
+                }
+                else if (name == "this")
+                {
+                    vmWriter.WritePush("pointer", 0);
+
+                    WriteElement(writer, tokens);
+                }
+                else if (name == "false" || name == "null")
+                {
+                    vmWriter.WritePush("constant", 0);
+
+                    WriteElement(writer, tokens);
+                }
+                else if (subroutineTable.KindOf(name) != null)
+                {
+                    WriteElement(writer, tokens, subroutineTable.KindOf(name) + "_" + subroutineTable.IndexOf(name) + "_used");
+
+                    vmWriter.WritePush(subroutineTable.KindOf(name), subroutineTable.IndexOf(name));
+                }
+                else if (classTable.KindOf(name) != null)
+                {
+                    WriteElement(writer, tokens, classTable.KindOf(name) + "_" + classTable.IndexOf(name) + "_used");
+
+                    vmWriter.WritePush(classTable.KindOf(name), classTable.IndexOf(name));
+                }
+                else if(Int32.TryParse(tokens[tokenIndex].text, out constVal))
+                {
+                    WriteElement(writer, tokens);
+                    vmWriter.WritePush("constant", constVal);
+                }
+                else //string constant
+                {
+                    WriteElement(writer, tokens);
+
+                    vmWriter.WritePush("constant", name.Length);
+                    vmWriter.WriteCall("String.new", 1);
+
+                    foreach (char character in name)
+                    {
+                        int ascii = character;
+                        vmWriter.WritePush("constant", ascii);
+                        vmWriter.WriteCall("String.appendChar", 2);
+                    }
+                }
+
+                //fileWriter.Write(name);
             }
 
             writer.WriteEndElement();
         }
 
-        private static void CompileVarDec(XmlWriter writer, List<Token> tokens)
+        private static int CompileVarDec(XmlWriter writer, List<Token> tokens)
         {
+            int varNum = 1;
+
             writer.WriteStartElement("varDec");
 
             // var
             WriteElement(writer, tokens);
 
             // type
-            WriteElement(writer, tokens);
+            string type = tokens[tokenIndex].text;
+            if(tokens[tokenIndex].type == "identifier")
+            {
+                WriteElement(writer, tokens, "class_used");
+            }
+            else
+            {
+                WriteElement(writer, tokens);
+            }
 
             // varName
-            WriteElement(writer, tokens);
+            string name = tokens[tokenIndex].text;
+            WriteElement(writer, tokens, type + "_" + subroutineTable.VarCount("var") + "_defined");
+
+            subroutineTable.Define(name, type, "var");
 
             while (tokens[tokenIndex].text == ",")
             {
@@ -693,31 +1081,44 @@ namespace JackCompiler
                 WriteElement(writer, tokens);
 
                 //varName
-                WriteElement(writer, tokens);
+                name = tokens[tokenIndex].text;
+                WriteElement(writer, tokens, type + "_" + subroutineTable.VarCount("var") + "_defined");
+
+                subroutineTable.Define(name, type, "var");
+
+                varNum += 1;
             }
 
             // ;
             WriteElement(writer, tokens);
 
             writer.WriteEndElement();
+
+            return varNum;
         }
 
-        private static void ComposeParameterList(XmlWriter writer, List<Token> tokens)
+        private static int ComposeParameterList(XmlWriter writer, List<Token> tokens)
         {
             // (
             WriteElement(writer, tokens);
 
             writer.WriteStartElement("parameterList");
 
-            writer.WriteString("");
+            int numParams = 0;
 
             if (tokens[tokenIndex].text != ")")
             {
                 // type
+                string type = tokens[tokenIndex].text; 
                 WriteElement(writer, tokens);
 
                 //varName
-                WriteElement(writer, tokens);
+                string name = tokens[tokenIndex].text;
+                WriteElement(writer, tokens, "arg_" + subroutineTable.VarCount("arg") + "_defined");
+
+                subroutineTable.Define(name, type, "arg");
+
+                numParams = 1;
 
                 while (tokens[tokenIndex].text != ")")
                 {
@@ -725,17 +1126,29 @@ namespace JackCompiler
                     WriteElement(writer, tokens);
 
                     // type
+                    type = tokens[tokenIndex].text;
                     WriteElement(writer, tokens);
 
                     //varName
-                    WriteElement(writer, tokens);
+                    name = tokens[tokenIndex].text;
+                    WriteElement(writer, tokens, "arg_" + subroutineTable.VarCount("arg") + "_defined");
+
+                    subroutineTable.Define(name, type, "arg");
+
+                    numParams++;
                 }
+            }
+            else
+            {
+                writer.WriteString("");
             }
 
             writer.WriteEndElement();
 
             // )
             WriteElement(writer, tokens);
+
+            return numParams;
         }
     }
 }
